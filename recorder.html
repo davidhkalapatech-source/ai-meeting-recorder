@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI Meeting Recorder</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;padding:30px;font-family:Arial,sans-serif;background:#F5F7FB;color:#1F2937}
+.container{max-width:760px;margin:auto;background:#FFF;padding:35px;border-radius:18px;box-shadow:0 8px 30px rgba(0,0,0,.08);text-align:center}
+h1{margin:0 0 10px;font-size:28px}.subtitle{color:#6B7280;line-height:1.6}
+#timer{font-size:52px;font-weight:bold;margin:30px 0}
+.buttons{display:flex;justify-content:center;gap:12px;flex-wrap:wrap}
+button{padding:14px 25px;border:none;border-radius:9px;font-weight:bold;font-size:15px;cursor:pointer}
+#startBtn{background:#DC2626;color:white}#stopBtn{background:#111827;color:white}
+button:disabled{opacity:.4;cursor:not-allowed}
+.info{margin-top:25px;padding:16px;background:#EFF6FF;border-radius:10px;text-align:left;color:#1E40AF;line-height:1.6;font-size:14px}
+.status{margin-top:20px;padding:15px;background:#F3F4F6;border-radius:10px;white-space:pre-wrap;line-height:1.5}
+.success{background:#ECFDF5;color:#065F46}.error{background:#FEF2F2;color:#991B1B}
+</style>
+</head>
+<body>
+<div class="container">
+<h1>🎙️ AI Meeting Recorder</h1>
+<div class="subtitle">Rekam microphone + audio meeting dari Google Meet, Zoom, Microsoft Teams, atau tab/window lain.</div>
+<div id="timer">00:00</div>
+<div class="buttons">
+<button id="startBtn" onclick="startRecording()">🔴 Start Recording</button>
+<button id="stopBtn" onclick="stopRecording()" disabled>⏹ Stop Recording</button>
+</div>
+<div class="info">
+<strong>Cara menggunakan:</strong><br><br>
+1. Klik <strong>Start Recording</strong>.<br>
+2. Pilih <strong>Chrome Tab</strong>, <strong>Window</strong>, atau <strong>Entire Screen</strong>.<br>
+3. Untuk Google Meet, pilih tab Google Meet.<br>
+4. Aktifkan <strong>Share audio</strong> jika tersedia.<br>
+5. Klik <strong>Share</strong>.<br>
+6. Setelah meeting selesai, kembali ke recorder dan klik <strong>Stop Recording</strong>.
+</div>
+<div id="status" class="status">Siap melakukan recording.</div>
+</div>
+
+<script>
+let mediaRecorder=null,audioChunks=[],displayStream=null,microphoneStream=null,combinedStream=null,audioContext=null,seconds=0,timerInterval=null;
+
+async function startRecording(){
+  try{
+    setStatus("🖥️ Meminta permission untuk memilih tab/window meeting...");
+
+    displayStream=await navigator.mediaDevices.getDisplayMedia({video:true,audio:true});
+    const displayAudioTracks=displayStream.getAudioTracks();
+
+    if(!displayAudioTracks.length){
+      setStatus("⚠️ Audio meeting tidak ikut terbaca.\n\nPastikan saat memilih tab/window Anda mengaktifkan 'Share audio'.\n\nRecording akan tetap mencoba merekam microphone.");
+    }
+
+    microphoneStream=await navigator.mediaDevices.getUserMedia({audio:true});
+
+    audioContext=new(window.AudioContext||window.webkitAudioContext)();
+    const destination=audioContext.createMediaStreamDestination();
+
+    if(displayAudioTracks.length){
+      const meetingAudioStream=new MediaStream(displayAudioTracks);
+      const meetingSource=audioContext.createMediaStreamSource(meetingAudioStream);
+      meetingSource.connect(destination);
+    }
+
+    const microphoneSource=audioContext.createMediaStreamSource(microphoneStream);
+    microphoneSource.connect(destination);
+    combinedStream=destination.stream;
+
+    let mimeType="audio/webm;codecs=opus";
+    if(!MediaRecorder.isTypeSupported(mimeType)) mimeType="audio/webm";
+
+    mediaRecorder=new MediaRecorder(combinedStream,{mimeType});
+    audioChunks=[];
+
+    mediaRecorder.ondataavailable=function(event){
+      if(event.data&&event.data.size>0) audioChunks.push(event.data);
+    };
+
+    mediaRecorder.onstop=function(){
+      try{
+        const blob=new Blob(audioChunks,{type:mediaRecorder.mimeType||"audio/webm"});
+        stopAllStreams();
+
+        if(window.opener){
+          window.opener.postMessage({type:"MEETING_AUDIO_READY",blob:blob},"*");
+        }
+
+        setStatus("✅ Recording selesai.\n\nAudio: "+(blob.size/1024/1024).toFixed(2)+" MB\n\nAudio sudah dikirim kembali ke AI Meeting Assistant.",true);
+        document.getElementById("startBtn").disabled=false;
+        document.getElementById("stopBtn").disabled=true;
+      }catch(error){setError(error.message)}
+    };
+
+    displayStream.getVideoTracks().forEach(function(track){
+      track.onended=function(){
+        if(mediaRecorder&&mediaRecorder.state!=="inactive") stopRecording();
+      };
+    });
+
+    mediaRecorder.start(1000);
+    seconds=0;updateTimer();
+    timerInterval=setInterval(updateTimer,1000);
+    document.getElementById("startBtn").disabled=true;
+    document.getElementById("stopBtn").disabled=false;
+    setStatus("🔴 RECORDING AKTIF\n\nMicrophone + audio meeting sedang direkam.");
+  }catch(error){
+    console.error(error);
+    stopAllStreams();
+    document.getElementById("startBtn").disabled=false;
+    document.getElementById("stopBtn").disabled=true;
+    setError(error.name+": "+error.message);
+  }
+}
+
+function stopRecording(){
+  if(mediaRecorder&&mediaRecorder.state!=="inactive") mediaRecorder.stop();
+  else stopAllStreams();
+  clearInterval(timerInterval);
+  document.getElementById("stopBtn").disabled=true;
+}
+
+function stopAllStreams(){
+  if(displayStream) displayStream.getTracks().forEach(track=>track.stop());
+  if(microphoneStream) microphoneStream.getTracks().forEach(track=>track.stop());
+  if(combinedStream) combinedStream.getTracks().forEach(track=>track.stop());
+  if(audioContext){try{audioContext.close()}catch(error){}}
+}
+
+function updateTimer(){
+  const min=Math.floor(seconds/60).toString().padStart(2,"0");
+  const sec=(seconds%60).toString().padStart(2,"0");
+  document.getElementById("timer").textContent=min+":"+sec;
+  seconds++;
+}
+
+window.addEventListener("message",function(event){
+  if(event.data&&event.data.type==="STOP_RECORDING") stopRecording();
+});
+
+if(window.opener){
+  window.opener.postMessage({type:"RECORDER_READY"},"*");
+}
+
+function setStatus(message,success){
+  const el=document.getElementById("status");
+  el.className=success?"status success":"status";
+  el.textContent=message;
+}
+
+function setError(message){
+  const el=document.getElementById("status");
+  el.className="status error";
+  el.textContent="❌ ERROR\n\n"+message;
+}
+</script>
+</body>
+</html>
